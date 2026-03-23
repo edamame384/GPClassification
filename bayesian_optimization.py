@@ -7,12 +7,24 @@
   - 各化合物の修飾率の合計は100（整数）
   - 非ゼロになるのはちょうど2変数のみ
   - 目的: 水溶性生成物（1=溶ける）の探索
+
+使い方:
+  python bayesian_optimization.py                        # デフォルト observations.csv を読み込む
+  python bayesian_optimization.py -i results.csv         # ファイルを指定
+  python bayesian_optimization.py -i results.csv -n 10   # 提案数を指定
+  python bayesian_optimization.py --init-csv             # サンプルCSVを生成して終了
+
+CSVフォーマット（必須列）:
+  A, B, C, D, E, F  ... 各化合物の修飾率（整数、合計=100、非ゼロは2列のみ）
+  soluble            ... 水溶性結果（1=溶ける, 0=溶けない）
 """
 
+import argparse
 import numpy as np
 import pandas as pd
 import csv
 import os
+import sys
 import warnings
 from itertools import combinations
 from sklearn.gaussian_process import GaussianProcessClassifier
@@ -63,18 +75,42 @@ def generate_all_candidates(step: int = 1) -> np.ndarray:
 # ============================================================
 # データ管理
 # ============================================================
-def load_observations(filepath: str = DATA_FILE):
-    """CSVから観測データを読み込む"""
+def load_observations(filepath: str):
+    """
+    CSVから観測データを読み込む。
+
+    必須列: A, B, C, D, E, F, soluble
+    存在しない場合や列が足りない場合はエラーメッセージを出して終了する。
+    """
     if not os.path.exists(filepath):
+        print(f"[エラー] ファイルが見つかりません: {filepath}")
+        print("  --init-csv オプションでサンプルCSVを生成できます。")
+        sys.exit(1)
+
+    try:
+        df = pd.read_csv(filepath)
+    except Exception as e:
+        print(f"[エラー] CSV読み込み失敗: {e}")
+        sys.exit(1)
+
+    required = ["A", "B", "C", "D", "E", "F", "soluble"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        print(f"[エラー] 必須列が不足しています: {missing}")
+        print(f"  必須列: {required}")
+        sys.exit(1)
+
+    df = df.dropna(subset=required)
+    if len(df) == 0:
+        print("[警告] 有効なデータ行がありません。ランダム提案を行います。")
         return np.empty((0, 6)), np.empty(0, dtype=int)
 
-    df = pd.read_csv(filepath)
     X = df[["A", "B", "C", "D", "E", "F"]].values.astype(float)
     y = df["soluble"].values.astype(int)
     return X, y
 
 
-def save_observation(x: list, y: int, filepath: str = DATA_FILE):
+def save_observation(x: list, y: int, filepath: str):
     """観測結果をCSVに追記する"""
     header = ["A", "B", "C", "D", "E", "F", "soluble"]
     row = list(x) + [y]
@@ -84,6 +120,25 @@ def save_observation(x: list, y: int, filepath: str = DATA_FILE):
         if write_header:
             writer.writerow(header)
         writer.writerow(row)
+
+
+def create_sample_csv(filepath: str):
+    """サンプルCSVファイルを生成する"""
+    sample = [
+        ["A",  "B",  "C",  "D",  "E",  "F",  "soluble"],
+        [ 50,   50,    0,    0,    0,    0,    1],
+        [ 30,    0,   70,    0,    0,    0,    0],
+        [  0,    0,    0,   60,   40,    0,    1],
+        [  0,   20,    0,    0,   80,    0,    0],
+        [  0,    0,    0,    0,   45,   55,    1],
+        [ 10,    0,    0,    0,    0,   90,    0],
+        [  0,   60,    0,   40,    0,    0,    1],
+    ]
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerows(sample)
+    print(f"サンプルCSVを生成しました: {filepath}")
+    print(f"  列: A, B, C, D, E, F（修飾率）, soluble（1=溶ける, 0=溶けない）")
 
 
 def format_candidate(x) -> str:
@@ -228,10 +283,10 @@ def show_summary(X_obs: np.ndarray, y_obs: np.ndarray):
 # ============================================================
 # インタラクティブ実行
 # ============================================================
-def interactive_mode(candidates: np.ndarray):
-    """対話形式で実験結果を入力・提案を受け取る"""
+def interactive_mode(candidates: np.ndarray, data_file: str):
+    """対話形式で実験結果の追加・提案を繰り返す"""
     print("\n" + "=" * 60)
-    print("対話モード")
+    print(f"対話モード  (データファイル: {data_file})")
     print("  [s] 次回候補を提案  [a] 観測データを追加")
     print("  [v] 観測データ一覧  [q] 終了")
     print("=" * 60)
@@ -244,11 +299,11 @@ def interactive_mode(candidates: np.ndarray):
             break
 
         elif cmd == "v":
-            X_obs, y_obs = load_observations()
+            X_obs, y_obs = load_observations(data_file)
             show_summary(X_obs, y_obs)
 
         elif cmd == "s":
-            X_obs, y_obs = load_observations()
+            X_obs, y_obs = load_observations(data_file)
             show_summary(X_obs, y_obs)
 
             try:
@@ -273,7 +328,7 @@ def interactive_mode(candidates: np.ndarray):
                 print("入力を中断しました。")
                 continue
 
-            save_observation(x, y)
+            save_observation(x, y, data_file)
             print(f"保存しました: {format_candidate(x)} -> {'溶ける' if y == 1 else '溶けない'}")
 
         else:
@@ -306,40 +361,6 @@ def _input_condition() -> list:
     return x
 
 
-# ============================================================
-# デモ実行
-# ============================================================
-def demo_run(candidates: np.ndarray):
-    """サンプルデータを使ったデモ"""
-    print("\n" + "=" * 60)
-    print("デモ実行（サンプルデータで動作確認）")
-    print("=" * 60)
-
-    demo_obs = [
-        ([50, 50,  0,  0,  0,  0], 1),  # A:50 B:50 → 溶ける
-        ([30,  0, 70,  0,  0,  0], 0),  # A:30 C:70 → 溶けない
-        ([ 0,  0,  0, 60, 40,  0], 1),  # D:60 E:40 → 溶ける
-        ([ 0, 20,  0,  0, 80,  0], 0),  # B:20 E:80 → 溶けない
-        ([ 0,  0,  0,  0, 45, 55], 1),  # E:45 F:55 → 溶ける
-        ([10,  0,  0,  0,  0, 90], 0),  # A:10 F:90 → 溶けない
-        ([ 0, 60,  0, 40,  0,  0], 1),  # B:60 D:40 → 溶ける
-    ]
-
-    print("\n--- 観測データ ---")
-    X_demo = np.array([x for x, _ in demo_obs], dtype=float)
-    y_demo = np.array([y for _, y in demo_obs], dtype=int)
-    for x, y in demo_obs:
-        label = "溶ける  " if y == 1 else "溶けない"
-        print(f"  {format_candidate(x):<25} → {label}")
-
-    print("\n--- ベイズ最適化による次回候補提案 ---")
-    df = suggest_next(candidates, X_demo, y_demo, n=5, beta=2.0)
-    print(df.to_string())
-
-    print("\n--- 水溶性確率マップ（上位10件）---")
-    _print_proba_top(candidates, X_demo, y_demo, top=10)
-
-
 def _print_proba_top(
     candidates: np.ndarray,
     X_obs: np.ndarray,
@@ -362,27 +383,96 @@ def _print_proba_top(
 # ============================================================
 # エントリーポイント
 # ============================================================
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="ベイズ最適化 - アミン化合物修飾実験（水溶性最適化）",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+CSVフォーマット（必須列）:
+  A, B, C, D, E, F  ... 各化合物の修飾率（整数、合計=100、非ゼロは2列のみ）
+  soluble            ... 水溶性結果（1=溶ける, 0=溶けない）
+
+使用例:
+  python bayesian_optimization.py                        # デフォルトCSVを読み込む
+  python bayesian_optimization.py -i results.csv         # ファイルを指定
+  python bayesian_optimization.py -i results.csv -n 10   # 提案数10件
+  python bayesian_optimization.py --init-csv             # サンプルCSVを生成
+  python bayesian_optimization.py -i results.csv --interactive  # 対話モード
+        """,
+    )
+    parser.add_argument(
+        "-i", "--input",
+        default=DATA_FILE,
+        metavar="CSV_FILE",
+        help=f"実験結果CSVファイルのパス（デフォルト: {DATA_FILE}）",
+    )
+    parser.add_argument(
+        "-n", "--num-suggestions",
+        type=int,
+        default=5,
+        metavar="N",
+        help="提案する候補点の数（デフォルト: 5）",
+    )
+    parser.add_argument(
+        "--beta",
+        type=float,
+        default=2.0,
+        help="UCB探索強度。大きいほど未探索領域を優先（デフォルト: 2.0）",
+    )
+    parser.add_argument(
+        "--top-proba",
+        type=int,
+        default=10,
+        metavar="K",
+        help="水溶性確率マップの表示件数（デフォルト: 10, 0で非表示）",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="対話モードを起動（結果追加と提案を繰り返す）",
+    )
+    parser.add_argument(
+        "--init-csv",
+        action="store_true",
+        help="サンプルCSVファイルを生成して終了",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
+    # サンプルCSV生成モード
+    if args.init_csv:
+        create_sample_csv(args.input)
+        sys.exit(0)
+
     print("=" * 60)
     print("  ベイズ最適化 - アミン化合物修飾実験")
     print("  目標: 水溶性生成物の最適組成探索")
     print("=" * 60)
+
     print(f"\n探索空間を生成中... ", end="", flush=True)
     candidates = generate_all_candidates(step=1)
     print(f"{len(candidates):,} 候補点")
 
-    print("\n実行モードを選択してください:")
-    print("  [1] デモ実行（サンプルデータで動作確認）")
-    print("  [2] 対話モード（実際のデータを入力・提案を受け取る）")
-    choice = input("\n選択 > ").strip()
+    # 対話モード
+    if args.interactive:
+        interactive_mode(candidates, args.input)
+        return
 
-    if choice == "1":
-        demo_run(candidates)
-    elif choice == "2":
-        interactive_mode(candidates)
-    else:
-        print("デフォルトでデモ実行します。")
-        demo_run(candidates)
+    # ---- 通常モード: CSVを読み込んで候補提案 ----
+    print(f"\nデータファイル: {args.input}")
+    X_obs, y_obs = load_observations(args.input)
+    show_summary(X_obs, y_obs)
+
+    print(f"\n--- ベイズ最適化による次回候補提案（{args.num_suggestions}件）---")
+    df = suggest_next(candidates, X_obs, y_obs, n=args.num_suggestions, beta=args.beta)
+    print(df.to_string())
+
+    if args.top_proba > 0 and len(X_obs) >= 3 and len(np.unique(y_obs)) >= 2:
+        print(f"\n--- 水溶性確率マップ（上位{args.top_proba}件）---")
+        _print_proba_top(candidates, X_obs, y_obs, top=args.top_proba)
 
 
 if __name__ == "__main__":
